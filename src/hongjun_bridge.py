@@ -242,8 +242,17 @@ class HermesMonitor:
                         self.bubble_expire = 0
                         self._last_think_time = time.time()
                         self._surprise_end_time = time.time() + 1.0
-                # 如果是助手消息且有内容，推送回复
+                # 如果是助手消息，先显示 reasoning（思考中的话）
                 if role == "assistant":
+                    reasoning = msg.get("reasoning") or msg.get("reasoning_content", "")
+                    if reasoning:
+                        short_reason = reasoning.strip()
+                        if len(short_reason) > 200:
+                            short_reason = short_reason[:200] + "..."
+                        with self._lock:
+                            self.bubble = short_reason
+                            self.bubble_expire = time.time() + 60
+                    # 如果有实际回复内容，推送回复
                     text = content.strip()
                     if text and not msg.get("tool_calls"):
                         with self._lock:
