@@ -1,0 +1,12 @@
+[Unit]
+Description=星澜宠物桥接服务 - AI 助手状态同步
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/hermes-agent/venv/bin/python3 %h/.hermes/hongjun_bridge.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
