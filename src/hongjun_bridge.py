@@ -43,6 +43,8 @@ class HermesMonitor:
         self._lock = threading.Lock()
         self._running = True
         self._last_think_time = 0
+        self._pending_reply = ""   # 思考时暂存的回复内容
+        self._surprise_end_time = 0  # 惊讶表情结束时间
         self._last_api_check = ""
 
         # CLI 会话追踪
@@ -54,6 +56,8 @@ class HermesMonitor:
         """持续监控 Hermes 状态"""
         while self._running:
             try:
+                self._flush_pending_reply()
+                self._check_surprise_timer()  # 惊讶→思考过渡
                 self._check_gateway()
                 self._check_log_activity()
                 self._check_api()
@@ -61,6 +65,26 @@ class HermesMonitor:
             except Exception:
                 pass
             time.sleep(POLL_INTERVAL)
+
+    def _check_surprise_timer(self):
+        """惊讶 0.5 秒后自动切到思考"""
+        if self._surprise_end_time and time.time() >= self._surprise_end_time:
+            with self._lock:
+                if self.mood == "surprised":
+                    self.mood = "thinking"
+                self._surprise_end_time = 0
+
+    def _flush_pending_reply(self):
+        """思考时间到后，把暂存的回复推送出去"""
+        if self._pending_reply and time.time() - self._last_think_time >= 2.5:
+            with self._lock:
+                self.last_reply = self._pending_reply
+                self.last_reply_time = time.strftime("%H:%M:%S")
+                self.status = "responding"
+                self.mood = "happy"
+                self.bubble = self._pending_reply
+                self.bubble_expire = time.time() + 600
+                self._pending_reply = ""
 
     def _check_gateway(self):
         """检查网关是否在线"""
@@ -178,7 +202,6 @@ class HermesMonitor:
         if not session_file:
             return
 
-        # 新会话文件或消息数变化
         try:
             with open(session_file, 'r', encoding='utf-8', errors='replace') as f:
                 data = json.load(f)
@@ -190,6 +213,7 @@ class HermesMonitor:
             return
 
         current_count = len(msgs)
+        if self._session_file and current_count > self._session_msg_count:
 
         # 第一次检测，只记录不触发
         if self._session_file != session_file:
@@ -209,33 +233,31 @@ class HermesMonitor:
             role = msg.get("role", "")
             content = str(msg.get("content", ""))
 
-            if role == "user":
-                # 用户发消息 → 进入思考状态，不设占位气泡
-                with self._lock:
-                    self.status = "thinking"
-                    self.mood = "thinking"
-                    self.bubble = ""  # 不显示"思考中..."
-                    self.bubble_expire = 0
-                    self._last_think_time = time.time()
-
-            elif role == "assistant":
-                # 只推送我实际说出来的文字，不推送工具调用/思维链
-                text = content.strip()
-                tool_calls = msg.get("tool_calls")
-                
-                # 有 tool_calls 且没有实际 content → 跳过（中间工具调用步骤）
-                if tool_calls and not text:
-                    continue
-                
-                # 有实际 content → 就是我说的话，推送
-                if text:
+            # 检测到任何非system新消息 → 可能有用户输入，触发思考
+            if role != "system" and role != "tool":
+                if self.status != "thinking":
                     with self._lock:
-                        self.last_reply = text
-                        self.last_reply_time = time.strftime("%H:%M:%S")
-                        self.status = "responding"
-                        self.mood = "happy"
-                        self.bubble = text
-                        self.bubble_expire = time.time() + 600
+                        self.status = "thinking"
+                        self.mood = "surprised"
+                        self.bubble = ""
+                        self.bubble_expire = 0
+                        self._last_think_time = time.time()
+                        self._surprise_end_time = time.time() + 1.0
+                # 如果是助手消息且有内容，推送回复
+                if role == "assistant":
+                    text = content.strip()
+                    if text and not msg.get("tool_calls"):
+                        with self._lock:
+                            if time.time() - self._last_think_time < 2.5:
+                                self._pending_reply = text
+                            else:
+                                self.last_reply = text
+                                self.last_reply_time = time.strftime("%H:%M:%S")
+                                self.status = "responding"
+                                self.mood = "happy"
+                                self.bubble = text
+                                self.bubble_expire = time.time() + 600
+                                self._pending_reply = ""
 
     def set_bubble(self, text, duration=4):
         """手动设置气泡"""
@@ -285,7 +307,16 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
             return
 
         if self.path == "/bubble":
-            monitor.set_bubble(body.get("text", ""), body.get("duration", 4))
+            text = body.get("text", "")
+            duration = body.get("duration", 4)
+            mood = body.get("mood", "")
+            with monitor._lock:
+                monitor.bubble = text
+                monitor.bubble_expire = time.time() + duration
+                if mood:
+                    monitor.mood = mood
+                if text:
+                    monitor.status = "responding"
             self._json({"ok": True})
         elif self.path == "/reply":
             text = body.get("text", "")
