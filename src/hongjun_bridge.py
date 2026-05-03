@@ -144,8 +144,9 @@ class HermesMonitor:
 
         self.last_log_size = current_size
 
-        # 检测"新消息"
-        if "inbound message" in tail.lower() or "inbound from" in tail.lower():
+        # 检测"新消息"（不覆盖已有回复状态）
+        if ("inbound message" in tail.lower() or "inbound from" in tail.lower()) \
+                and self.status != "responding":
             with self._lock:
                 self.status = "thinking"
                 self.mood = "thinking"
@@ -254,11 +255,14 @@ class HermesMonitor:
                         self.bubble_expire = 0
                         self._last_think_time = time.time()
                         self._surprise_end_time = time.time() + 1.0
-                # 收集助手回复文字（无 tool_calls）
+                # 收集助手回复文字
                 if role == "assistant":
                     text = content.strip()
-                    if text and not msg.get("tool_calls"):
-                        all_contents.append(text)
+                    if text:
+                        # 按段落拆分，每段独立显示
+                        paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+                        if paragraphs:
+                            all_contents.extend(paragraphs)
 
         # 入队，逐条显示
         if all_contents:
