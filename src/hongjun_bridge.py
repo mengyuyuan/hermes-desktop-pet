@@ -258,7 +258,7 @@ class HermesMonitor:
                 # 收集助手回复文字
                 if role == "assistant":
                     text = content.strip()
-                    if text:
+                    if text and "Operation interrupted" not in text and "waiting for model response" not in text:
                         # 按段落拆分，每段独立显示
                         paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
                         if paragraphs:
