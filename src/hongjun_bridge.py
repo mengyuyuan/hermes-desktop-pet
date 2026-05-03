@@ -43,7 +43,8 @@ class HermesMonitor:
         self._lock = threading.Lock()
         self._running = True
         self._last_think_time = 0
-        self._pending_reply = ""   # 思考时暂存的回复内容
+        self._pending_messages = []  # 待显示消息队列
+        self._next_display_time = 0  # 下一条消息的最早显示时间
         self._surprise_end_time = 0  # 惊讶表情结束时间
         self._last_api_check = ""
 
@@ -75,16 +76,25 @@ class HermesMonitor:
                 self._surprise_end_time = 0
 
     def _flush_pending_reply(self):
-        """思考时间到后，把暂存的回复推送出去"""
-        if self._pending_reply and time.time() - self._last_think_time >= 2.5:
-            with self._lock:
-                self.last_reply = self._pending_reply
-                self.last_reply_time = time.strftime("%H:%M:%S")
-                self.status = "responding"
-                self.mood = "happy"
-                self.bubble = self._pending_reply
-                self.bubble_expire = time.time() + 600
-                self._pending_reply = ""
+        """从消息队列中逐条推送，每条至少间隔 1.5s"""
+        if not self._pending_messages:
+            return
+        now = time.time()
+        # 思考至少 2.5s 后才开始显示，之后每条间隔 1.5s
+        min_wait = 2.5 if not self.last_reply else 1.5
+        if now - self._last_think_time < min_wait:
+            return
+        if now < self._next_display_time:
+            return
+        text = self._pending_messages.pop(0)
+        with self._lock:
+            self.last_reply = text
+            self.last_reply_time = time.strftime("%H:%M:%S")
+            self.status = "responding"
+            self.mood = "happy"
+            self.bubble = text
+            self.bubble_expire = time.time() + 600
+            self._next_display_time = now + 1.5
 
     def _check_gateway(self):
         """检查网关是否在线"""
@@ -228,14 +238,13 @@ class HermesMonitor:
         new_msgs = msgs[self._session_msg_count:]
         self._session_msg_count = current_count
 
-        last_reasoning = ""
-        last_content = ""
+        all_contents = []  # 收集所有 assistant content
 
         for msg in new_msgs:
             role = msg.get("role", "")
             content = str(msg.get("content", ""))
 
-            # 检测到任何非system新消息 → 可能有用户输入，触发思考
+            # 检测到任何非system新消息 → 触发思考
             if role != "system" and role != "tool":
                 if self.status != "thinking":
                     with self._lock:
@@ -245,30 +254,16 @@ class HermesMonitor:
                         self.bubble_expire = 0
                         self._last_think_time = time.time()
                         self._surprise_end_time = time.time() + 1.0
-                # 如果是助手消息，收集 reasoning 和 content
+                # 收集助手回复文字（无 tool_calls）
                 if role == "assistant":
-                    reasoning = msg.get("reasoning") or msg.get("reasoning_content", "")
-                    if reasoning:
-                        short_reason = reasoning.strip()
-                        if len(short_reason) > 200:
-                            short_reason = short_reason[:200] + "..."
-                        last_reasoning = short_reason
-                    # 有实际回复内容（无 tool_calls）
                     text = content.strip()
                     if text and not msg.get("tool_calls"):
-                        last_content = text
+                        all_contents.append(text)
 
-        # 批量处理完：先显示 reasoning，content 延迟到下一轮
-        with self._lock:
-            if last_reasoning and self.status == "thinking":
-                self.bubble = last_reasoning
-                self.bubble_expire = time.time() + 60
-            if last_content:
-                # 存为 pending，下一轮 flush 时显示
-                self._pending_reply = last_content
-                # 重置 think 时间让 flush 延迟生效
-                if self._last_think_time == 0:
-                    self._last_think_time = time.time()
+        # 入队，逐条显示
+        if all_contents:
+            with self._lock:
+                self._pending_messages.extend(all_contents)
 
     def set_bubble(self, text, duration=4):
         """手动设置气泡"""
