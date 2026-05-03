@@ -44,7 +44,7 @@ class HermesMonitor:
         self._running = True
         self._last_think_time = 0
         self._pending_messages = []  # 待显示消息队列
-        self._next_display_time = 0  # 下一条消息的最早显示时间
+        self._next_display_time = 0
         self._surprise_end_time = 0  # 惊讶表情结束时间
         self._last_api_check = ""
 
@@ -76,11 +76,10 @@ class HermesMonitor:
                 self._surprise_end_time = 0
 
     def _flush_pending_reply(self):
-        """从消息队列中逐条推送，每条至少间隔 1.5s"""
+        """从消息队列逐条推送，每条间隔 1.5s"""
         if not self._pending_messages:
             return
         now = time.time()
-        # 思考至少 2.5s 后才开始显示，之后每条间隔 1.5s
         min_wait = 2.5 if not self.last_reply else 1.5
         if now - self._last_think_time < min_wait:
             return
@@ -239,13 +238,11 @@ class HermesMonitor:
         new_msgs = msgs[self._session_msg_count:]
         self._session_msg_count = current_count
 
-        all_contents = []  # 收集所有 assistant content
-
         for msg in new_msgs:
             role = msg.get("role", "")
             content = str(msg.get("content", ""))
 
-            # 检测到任何非system新消息 → 触发思考
+            # 检测到任何非system新消息 → 可能有用户输入，触发思考
             if role != "system" and role != "tool":
                 if self.status != "thinking":
                     with self._lock:
@@ -255,19 +252,21 @@ class HermesMonitor:
                         self.bubble_expire = 0
                         self._last_think_time = time.time()
                         self._surprise_end_time = time.time() + 1.0
-                # 收集助手回复文字
+                # 如果是助手消息且有内容，推送回复
                 if role == "assistant":
                     text = content.strip()
-                    if text and "Operation interrupted" not in text and "waiting for model response" not in text:
-                        # 按段落拆分，每段独立显示
-                        paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-                        if paragraphs:
-                            all_contents.extend(paragraphs)
-
-        # 入队，逐条显示
-        if all_contents:
-            with self._lock:
-                self._pending_messages.extend(all_contents)
+                    if text and not msg.get("tool_calls"):
+                        with self._lock:
+                            if time.time() - self._last_think_time < 2.5:
+                                self._pending_reply = text
+                            else:
+                                self.last_reply = text
+                                self.last_reply_time = time.strftime("%H:%M:%S")
+                                self.status = "responding"
+                                self.mood = "happy"
+                                self.bubble = text
+                                self.bubble_expire = time.time() + 600
+                                self._pending_reply = ""
 
     def set_bubble(self, text, duration=4):
         """手动设置气泡"""
@@ -330,14 +329,12 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
             self._json({"ok": True})
         elif self.path == "/reply":
             text = body.get("text", "")
-            with monitor._lock:
-                monitor.last_reply = text
-                monitor.last_reply_time = time.strftime("%H:%M:%S")
-                monitor.mood = "happy"
-                monitor.status = "responding"
-                monitor.bubble = text
-                monitor.bubble_expire = time.time() + 600  # 10分钟
-            self._json({"ok": True})
+            if text:
+                paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+                with monitor._lock:
+                    monitor._pending_messages.extend(paragraphs)
+                    monitor._last_think_time = time.time()
+            self._json({"ok": True, "queued": len(paragraphs) if text else 0})
         elif self.path == "/think":
             with monitor._lock:
                 monitor.status = "thinking"
