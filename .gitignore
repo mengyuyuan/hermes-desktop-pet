@@ -1,0 +1,20 @@
+# Compiled output
+*.exe
+*.dll
+*.pdb
+
+# Logs
+*.log
+*.txt.log
+
+# Temp files
+bridge_url.txt
+*_err.txt
+*_out.txt
+
+# Test files
+TestPet.cs
+TestPet2.cs
+TestPet.exe
+TestPet2.exe
+TestPet_part1.cs

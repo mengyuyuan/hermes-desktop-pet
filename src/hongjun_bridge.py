@@ -43,7 +43,7 @@ class HermesMonitor:
         self._lock = threading.Lock()
         self._running = True
         self._last_think_time = 0
-        self._pending_messages = []  # 待显示消息队列
+        self._latest_reply = ""  # 只保留最新一条，不堆积
         self._next_display_time = 0
         self._surprise_end_time = 0  # 惊讶表情结束时间
         self._last_api_check = ""
@@ -62,7 +62,7 @@ class HermesMonitor:
                 self._check_gateway()
                 self._check_log_activity()
                 self._check_api()
-                self._check_cli_session()
+                # _check_cli_session() DISABLED - causes session replay flood on restart
             except Exception:
                 pass
             time.sleep(POLL_INTERVAL)
@@ -76,24 +76,23 @@ class HermesMonitor:
                 self._surprise_end_time = 0
 
     def _flush_pending_reply(self):
-        """从消息队列逐条推送，每条间隔 1.5s"""
-        if not self._pending_messages:
+        """显示最新一条回复"""
+        if not self._latest_reply:
             return
         now = time.time()
-        min_wait = 2.5 if not self.last_reply else 1.5
-        if now - self._last_think_time < min_wait:
+        if now - self._last_think_time < 2.5:
             return
-        if now < self._next_display_time:
+        text = self._latest_reply
+        self._latest_reply = ""
+        if text.strip() == "[SILENT]":
             return
-        text = self._pending_messages.pop(0)
         with self._lock:
             self.last_reply = text
             self.last_reply_time = time.strftime("%H:%M:%S")
             self.status = "responding"
             self.mood = "happy"
             self.bubble = text
-            self.bubble_expire = time.time() + 600
-            self._next_display_time = now + 1.5
+            self.bubble_expire = time.time() + 10
 
     def _check_gateway(self):
         """检查网关是否在线"""
@@ -265,7 +264,7 @@ class HermesMonitor:
                                 self.status = "responding"
                                 self.mood = "happy"
                                 self.bubble = text
-                                self.bubble_expire = time.time() + 600
+                                self.bubble_expire = time.time() + 10  # 10秒后消失
                                 self._pending_reply = ""
 
     def set_bubble(self, text, duration=4):
@@ -277,9 +276,13 @@ class HermesMonitor:
     def get_state(self):
         """获取当前状态（线程安全）"""
         with self._lock:
-            # 气泡过期清空
-            if self.bubble_expire < time.time() and self.status != "thinking":
+            now = time.time()
+            # 气泡过期清空，同时重置状态为 idle（如果当前是 responding）
+            if self.bubble_expire < now and self.status != "thinking":
                 self.bubble = ""
+                if self.status == "responding":
+                    self.status = "idle"
+                    self.mood = "normal"
 
             return {
                 "online": self.online,
@@ -288,6 +291,7 @@ class HermesMonitor:
                 "bubble": self.bubble,
                 "last_reply": self.last_reply,
                 "last_reply_time": self.last_reply_time,
+                "queue_size": 0,
                 "timestamp": time.strftime("%H:%M:%S")
             }
 
@@ -330,11 +334,11 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
         elif self.path == "/reply":
             text = body.get("text", "")
             if text:
-                paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-                with monitor._lock:
-                    monitor._pending_messages.extend(paragraphs)
-                    monitor._last_think_time = time.time()
-            self._json({"ok": True, "queued": len(paragraphs) if text else 0})
+                if text.strip() != "[SILENT]":
+                    with monitor._lock:
+                        monitor._latest_reply = text
+                        monitor._last_think_time = time.time()
+            self._json({"ok": True})
         elif self.path == "/think":
             with monitor._lock:
                 monitor.status = "thinking"
@@ -343,6 +347,18 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
                 monitor.bubble_expire = 0
                 monitor._last_think_time = time.time()
             self._json({"ok": True})
+        elif self.path == "/clear":
+            with monitor._lock:
+                monitor._latest_reply = ""
+                monitor.bubble = ""
+                monitor.bubble_expire = 0
+                monitor.last_reply = ""
+                monitor.last_reply_time = ""
+                monitor.status = "idle"
+                monitor.mood = "normal"
+                monitor._pending_reply = ""
+                monitor._next_display_time = 0
+            self._json({"ok": True, "message": "Queue cleared, state reset to idle"})
         else:
             self.send_error(404)
 
